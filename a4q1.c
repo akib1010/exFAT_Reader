@@ -1,3 +1,11 @@
+//-------------------------------------
+//Name: Farhan Akib Rahman
+//Student Number:7854163
+//Course: Comp3439
+//Assignment: 4 , Question:1
+//
+//Remarks:A program which reads an exFAT image and can run 3 commands (info,list,get)
+//-------------------------------------
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -7,9 +15,9 @@
 #include <string.h>
 #include <math.h>
 
-int sectorLength;
-int clusterLength;
-int fatEOF;//index which indicates Ending of the linkedlist
+//Global Variables
+int sectorLength;//Length of a sector in bytes
+int clusterLength;//Length of a cluster in bytes
 
 #pragma pack(push)
 #pragma pack(1)
@@ -31,6 +39,8 @@ typedef struct  MAIN_BOOT_SECTOR
     
 }MBS;
 #pragma pack(pop)
+
+#define MAX_PATH_SIZE 100
 
 /**
  * Convert a Unicode-formatted string containing only ASCII characters
@@ -76,6 +86,7 @@ static char *unicode2ascii( uint16_t *unicode_string, uint8_t length )
     return ascii_string;
 }
 
+//This fucntion returns an array which represents the cluster chain, the first cluster of the file is used as a parameter
 uint32_t* buildClusterChain(int fd,MBS* mainSec, uint32_t firstLocation)
 {
     uint32_t temp[(int)mainSec->clusterCount+1];
@@ -102,14 +113,17 @@ uint32_t* buildClusterChain(int fd,MBS* mainSec, uint32_t firstLocation)
             //Add the value to the list
             read(fd,&temp[i],4);
             //End of list
-            if(temp[i]==UINT32_MAX)
+            if(temp[i]==UINT32_MAX ||temp[i]==0)
             {
+                //If it is the last position assign UINT32_MAX to represent end of list
+                temp[i]=UINT32_MAX;
                 count++;
                 break;
             }
         }
         count++;
     }
+    //Heap allocation
     uint32_t* result;
     result=(uint32_t*)(malloc(sizeof(uint32_t)*count));
     for(i=0;i<count;i++)
@@ -122,18 +136,19 @@ uint32_t* buildClusterChain(int fd,MBS* mainSec, uint32_t firstLocation)
 }
 
 
-//This fucntion is used to print the info about the file
+//This fucntion is used to print the "info" about the file
 void getInfo(int fd,MBS* mainSec)
 {
     int i;
     uint8_t type;
-    //Go to the cluster heap
+    //Go to the cluster heap and seek to the root directory
     lseek(fd,mainSec->clusterHeapOffset*sectorLength,SEEK_SET);
     lseek(fd,(mainSec->firstClusterOfRootDir-2)*clusterLength,SEEK_CUR);
     //Find the volume label
     for(i=0;i<clusterLength/32;i++)
     {
         read(fd,&type,1);
+        //If entry type matches we found the volume label
         if(type==0x83)
         {
             break;
@@ -150,12 +165,13 @@ void getInfo(int fd,MBS* mainSec)
     {
         read(fd,&labelUnicode[i],2);
     }
+    //Convert the unicode to ascii
     char* label=unicode2ascii(labelUnicode,labelLength);
     //Calculating the free space
     uint32_t bitmapLocation=0;
     for(i=0;i<clusterLength/32 && bitmapLocation==0;i++)
     {
-        //Go to the cluster heap
+        //Go to the cluster heap and seek to the root directory
         lseek(fd,mainSec->clusterHeapOffset*sectorLength,SEEK_SET);
         lseek(fd,((mainSec->firstClusterOfRootDir-2)*clusterLength)+(32*i),SEEK_CUR);
         read(fd,&type,1);
@@ -169,37 +185,39 @@ void getInfo(int fd,MBS* mainSec)
         }
     }
 
+    //Make the cluster chain for the bitmap
     uint32_t* clusterChain= buildClusterChain(fd,mainSec,bitmapLocation);
-    uint8_t oneByte;
-    int popCount=0;
+    uint8_t oneByte;//used to read the cluster 1 byte at a time
+    int popCount=0;//used to Count the unset bits
     //Now go to the cluster that holds the allocation bitmap
     //Go to the start of the cluster heap
     lseek(fd,mainSec->clusterHeapOffset*sectorLength,SEEK_SET);
     //Go to the cluster which contains the allocation bitmap
     lseek(fd,(bitmapLocation-2)*clusterLength,SEEK_CUR);
     int j;
-    int count=0;
-    int index=1;
+    int count=0;//used to count the number of clusters
+    int index=1;//used as an index to the cluster chain
     for(i=0;i<(int)(mainSec->clusterCount-1);i+=8)
     {
         read(fd,&oneByte,1);
+        //Counting the 8 bits of 1 byte
         for(j=0;j< 8; j++)
         {
-            //printf("%i ", oneByte & 0x01);
             if((oneByte & 0x01)==0)
             {
                 popCount++;
             }
             oneByte = oneByte >> 1;
         }
-        //printf("\n");
         count++;
+        //if the cluster is over
         if(count==clusterLength)
         {
             //Go to the start of the cluster heap
             lseek(fd,mainSec->clusterHeapOffset*sectorLength,SEEK_SET);
-            //Go to the cluster which contains the next allocation bitmap
+            //Go to the next cluster which contains the next allocation bitmap
             lseek(fd,(clusterChain[index]-2)*clusterLength,SEEK_CUR);
+            //If we reach the end of list
             if(clusterChain[index]==UINT32_MAX)
             {
                 break;
@@ -218,22 +236,27 @@ void getInfo(int fd,MBS* mainSec)
     printf("Free Space: %dKB\n",(popCount*clusterLength)/1024);
     printf("Cluster Size: %d Bytes or %d Sectors\n",clusterLength,clusterLength/sectorLength);
     printf("/////////////////////////////////////////\n");
-    
+    //Clean up
     free(clusterChain);
     free(label);
 }
+
+//This fucntion traverses through all the directories and files in the image recursively
 void recList(int fd,MBS* mainSec,uint32_t clusterIndex,int level)
 {
+    //Build the cluster chain of the file/directory
     uint32_t* clusterChain=buildClusterChain(fd,mainSec,clusterIndex);
     int index=0;
     int i;
     int j;
-    uint8_t type;
-    uint8_t nameLength;
-    uint32_t clstr;
-    uint16_t name[15];
-    uint16_t fileAtr;
-    char* nameInChar;
+    int z;
+    uint8_t type;//used to read the entry type
+    uint8_t nameLength;//used to get the length of the file name
+    uint32_t clstr;//used to store the firstCluster of the file/directory
+    uint16_t name[15];//To read the file name
+    uint16_t fileAtr;//To read the fileAttributes
+    char* nameInChar;//Used to store the name of the file in ascii
+    //Flags used to check the validity of the file dir entries
     int fileFlag=0;
     int streamFlag=0;
     int nameFlag=0;
@@ -244,7 +267,6 @@ void recList(int fd,MBS* mainSec,uint32_t clusterIndex,int level)
         lseek(fd,mainSec->clusterHeapOffset*sectorLength,SEEK_SET);
         //GO to the cluster according to the cluster chain
         lseek(fd,(clusterChain[index]-2)*clusterLength,SEEK_CUR);
-        //printf("\\\\\\\\\\\\\\\\\\\\\\\\\n");
         for(i=0;i<clusterLength/32;i++)
         {
             read(fd,&type,1);
@@ -252,10 +274,9 @@ void recList(int fd,MBS* mainSec,uint32_t clusterIndex,int level)
             if(type==0x85)
             {
                 fileFlag=1;
-                //Check if it is a file or directory
+                //get the value which indicates a file or directory
                 lseek(fd,3,SEEK_CUR);
                 read(fd,&fileAtr,2);
-                //printf("fileAtr: %u\n",fileAtr);
                 fileAtr=fileAtr >> 4;
                 //Skip the next 26byts
                 lseek(fd,26,SEEK_CUR);
@@ -272,9 +293,11 @@ void recList(int fd,MBS* mainSec,uint32_t clusterIndex,int level)
                 streamFlag=1;
                 //Read the length of the file name
                 lseek(fd,2,SEEK_CUR);
+                //Get the name Length
                 read(fd,&nameLength,1);
-                //Get the first cluster of the directory
+                //Skip 16 bytes
                 lseek(fd,16,SEEK_CUR);
+                //Get the first cluster of the directory
                 read(fd,&clstr,4);
                 //Go to the file name dir entry
                 lseek(fd,8,SEEK_CUR);
@@ -290,18 +313,21 @@ void recList(int fd,MBS* mainSec,uint32_t clusterIndex,int level)
                 {
                     read(fd,&name[j],2);
                 }
-                nameInChar=unicode2ascii(name,nameLength);
+                //Convert the name
+                nameInChar=unicode2ascii(name,(uint8_t)15);
             }
             else
             {
+                //Go to the next dir entry
                 lseek(fd,31,SEEK_CUR);
             }
             
+            //If we found a file name
             if(nameFlag==1)
             {
                 nameFlag=0;
                 //Print "-" according to level of recursion
-                for(i=0;i<level;i++)
+                for(z=0;z<level;z++)
                 {
                     printf("-");
                 }
@@ -311,119 +337,172 @@ void recList(int fd,MBS* mainSec,uint32_t clusterIndex,int level)
                     dirFlag=0;
                     //Print the name of the directory
                     printf("Directory: %s\n",nameInChar);
-                    //Recursively call the function
+                    //Recursion
                     recList(fd,mainSec,clstr,level+1);
-//                    //Go to the cluster heap
-//                    lseek(fd,mainSec->clusterHeapOffset*sectorLength,SEEK_SET);
-//                    //GO to the cluster according to the cluster chain
-//                    lseek(fd,((clusterChain[index]-2)*clusterLength)+(i-2)*32,SEEK_CUR);
+                    //The position in the file changes after recursion
+                    //Go back to old position
+                    lseek(fd,mainSec->clusterHeapOffset*sectorLength,SEEK_SET);
+                    lseek(fd,(clusterChain[index]-2)*clusterLength,SEEK_CUR);
+                    lseek(fd,(i+1)*32,SEEK_CUR);
                 }
+                //Print the file name if it is a file
                 else
                 {
                     printf("File: %s\n",nameInChar);
                 }
             }
-        }
+        }//for
         index++;
-    }
+    }//while
+    //Clean up
+    free(clusterChain);
+    free(nameInChar);
 }
-//void getList(int fd,MBS* mainSec)
-//{
-//    int i;
-//    uint8_t type;
-//    //Go to the cluster heap
-//    lseek(fd,mainSec->clusterHeapOffset*sectorLength,SEEK_SET);
-//    lseek(fd,(mainSec->firstClusterOfRootDir-2)*clusterLength,SEEK_CUR);
-//    //Find the volume label
-//    for(i=0;i<clusterLength/32;i++)
-//    {
-//        read(fd,&type,1);
-//        printf("Type: %02x\n",type);
-//        if(type==0x85 && i>6)
-//        {
-//            break;
-//        }
-//        lseek(fd,31,SEEK_CUR);
-//    }
-//    lseek(fd,3,SEEK_CUR);
-//    uint16_t fileAtr;
-//    read(fd,&fileAtr,2);
-//    printf("fileAtr: %u\n",fileAtr);
-//    fileAtr=fileAtr >> 4;
-//    if((fileAtr & 0x01)==1)
-//    {
-//        printf("Directory\n");
-//    }
-//    else
-//    {
-//        printf("File\n");
-//    }
-//    lseek(fd,26,SEEK_CUR);
-//    read(fd,&type,1);
-//    if(type==0xC0)
-//    {
-//        printf("Found Stream\n");
-//    }
-//    uint8_t nameLength;
-//    lseek(fd,2,SEEK_CUR);
-//    read(fd,&nameLength,1);
-//    uint32_t clstr;
-//    lseek(fd,16,SEEK_CUR);
-//    read(fd,&clstr,4);
-//    //uint32_t* chain=buildClusterChain(fd,mainSec,clstr);
-//    //Go to the start of the cluster heap
-//    lseek(fd,mainSec->clusterHeapOffset*sectorLength,SEEK_SET);
-//    //Go to the cluster which contains the allocation bitmap
-//    lseek(fd,(clstr-2)*clusterLength,SEEK_CUR);
-////    int j;
-////    int count=0;
-////    int index=1;
-//    for(i=0;i<clusterLength/32;i++)
-//    {
-//        read(fd,&type,1);
-//        printf("Type: %02x\n",type);
-//        if(type==0x85)
-//        {
-//            break;
-//        }
-//        lseek(fd,31,SEEK_CUR);
-//    }
-//    lseek(fd,3,SEEK_CUR);
-//    read(fd,&fileAtr,2);
-//    printf("fileAtr: %08x\n",fileAtr);
-//    fileAtr=fileAtr >> 4;
-//    if((fileAtr & 0x01)==1)
-//    {
-//        printf("Directory\n");
-//    }
-//    else
-//    {
-//        printf("File\n");
-//    }
-//    lseek(fd,26,SEEK_CUR);
-//    read(fd,&type,1);
-//    if(type==0xC0)
-//    {
-//        printf("Found Stream\n");
-//    }
-//    lseek(fd,2,SEEK_CUR);
-//    read(fd,&nameLength,1);
-//
-//    lseek(fd,28,SEEK_CUR);
-//    read(fd,&type,1);
-//    if(type==0xC1)
-//    {
-//        printf("Found File\n");
-//    }
-//    uint16_t name[15];
-//    lseek(fd,1,SEEK_CUR);
-//    for(i=0;i<15;i++)
-//    {
-//        read(fd,&name[i],2);
-//    }
-//    char* nn=unicode2ascii(name,nameLength);
-//    printf("Name %s\n",nn);
-//}
+
+//This fucntion copies a file from the given image to the current directory
+void getFile(int fd,MBS* mainSec,char* line)
+{
+    //Parse the path of the file
+    char* path[MAX_PATH_SIZE];
+    char* token;
+    int count=0;//Number of file/directory in the path
+    token=strtok(line,"/");
+    while(token!=NULL)
+    {
+        path[count]=strdup(token);
+        count++;
+        token=strtok(NULL,"/");
+    }
+    //
+    //Build the cluster chain
+    uint32_t* clusterChain;
+    clusterChain= buildClusterChain(fd,mainSec,mainSec->firstClusterOfRootDir);
+    uint8_t type;//used to get the entry type
+    uint8_t nameLength;//used to get the length
+    uint32_t clstr;//used to get the first cluster
+    uint16_t name[15];//used to read the name
+    char* nameInChar;
+    int found;//Flag used to check if we found the file/directory that is needed
+    int i;
+    int j;
+    int z;
+    int k;
+    //Search for the file
+    for(i=0;i<count;i++)
+    {
+        j=0;
+        found=0;
+        while(clusterChain[j]!=UINT32_MAX && found==0)
+        {
+            z=0;
+            //Go to the location of according to the cluster chain
+            lseek(fd,mainSec->clusterHeapOffset*sectorLength,SEEK_SET);
+            lseek(fd,(clusterChain[j]-2)*clusterLength,SEEK_CUR);
+            //Go through the cluster
+            while(z<clusterLength/32 && found==0)
+            {
+                read(fd,&type,1);
+                //If we find the file directory entry
+                if(type==0x85)
+                {
+                    //Go to the next dir entry
+                    lseek(fd,31,SEEK_CUR);
+                    z++;
+                    //if the cluster is finished midway Jump to the next cluster
+                    if(z>=(clusterLength/32))
+                    {
+                        lseek(fd,mainSec->clusterHeapOffset*sectorLength,SEEK_SET);
+                        lseek(fd,(clusterChain[j+1]-2)*clusterLength,SEEK_CUR);
+                    }
+                    //Check if it is the stream extension
+                    read(fd,&type,1);
+                    if(type==0xC0)
+                    {
+                        //Read the length of the file name
+                        lseek(fd,2,SEEK_CUR);
+                        read(fd,&nameLength,1);
+                        //Get the first cluster of the directory
+                        lseek(fd,16,SEEK_CUR);
+                        read(fd,&clstr,4);
+                        //Go to the next dir entry
+                        lseek(fd,8,SEEK_CUR);
+                        z++;
+                        //if the cluster is finished midway Jump to the next cluster
+                        if(z>=(clusterLength/32))
+                        {
+                            lseek(fd,mainSec->clusterHeapOffset*sectorLength,SEEK_SET);
+                            lseek(fd,(clusterChain[j+1]-2)*clusterLength,SEEK_CUR);
+                        }
+                        //Check if it is the file name directory
+                        read(fd,&type,1);
+                        if(type==0xC1)
+                        {
+                            //Get the name
+                            lseek(fd,1,SEEK_CUR);
+                            for(k=0;k<15;k++)
+                            {
+                                read(fd,&name[k],2);
+                            }
+                            z++;
+                            //Convert the name
+                            nameInChar=unicode2ascii(name,nameLength);
+                            if(strcmp(nameInChar,path[i])==0)
+                            {
+                                //We found the required directory/file
+                                found=1;
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    //Go to the next dir entry
+                    lseek(fd,31,SEEK_CUR);
+                    z++;;
+                }
+            }//While
+            j++;
+        }//While
+        if(found==1)
+        {
+            free(clusterChain);
+            //Build the cluster chain of the file that has been found
+            clusterChain=buildClusterChain(fd,mainSec,clstr);
+        }
+    }//for
+    
+    //If we found the file
+    if(found==1)
+    {
+        printf("Found file: %s\n",nameInChar);
+        //Open or create the file
+        int newFd=open(nameInChar,O_RDONLY|O_WRONLY|O_CREAT);
+        uint8_t content[clusterLength];//used to the bytes in a cluster
+        i=0;
+        //Copy the file out of the image
+        while(clusterChain[i]!=UINT32_MAX)
+        {
+            //Go to the location according to the cluster chain
+            lseek(fd,mainSec->clusterHeapOffset*sectorLength,SEEK_SET);
+            lseek(fd,(clusterChain[i]-2)*clusterLength,SEEK_CUR);
+            if(clusterChain[i]!=0)
+            {
+                //Read from the cluster and write to the file
+                read(fd,&content,clusterLength);
+                write(newFd,&content,clusterLength);
+            }
+            i++;
+        }//while
+    }
+    else
+    {
+        printf("File not found\n");
+    }
+    //clean up
+    free(clusterChain);
+    free(nameInChar);
+}
+
 
 int main(int argc,char* argv[])
 {
@@ -444,125 +523,12 @@ int main(int argc,char* argv[])
     {
         recList(fd,mainSec,mainSec->firstClusterOfRootDir,0);
     }
+    if(strcmp(argv[2],"get")==0)
+    {
+        getFile(fd,mainSec,argv[3]);
+    }
     //Clean up
     close(fd);
     free(mainSec);
     return EXIT_SUCCESS;
 }
-
-    //
-    //        ////////////////////////////////
-    //        for(i=0;i<clusterLength/32;i++)
-    //        {
-    //            read(fd,&type,1);
-    //            printf("Type: %02x\n",type);
-    //            //If we find a directory file entry
-    //            if(type==0x85)
-    //            {
-    //                //Check if it is a file or directory
-    //                lseek(fd,3,SEEK_CUR);
-    //                read(fd,&fileAtr,2);
-    //                //printf("fileAtr: %u\n",fileAtr);
-    //                fileAtr=fileAtr >> 4;
-    //                //Directory
-    //                if((fileAtr & 0x01)==1)
-    //                {
-    //                    //Check if the stream extension exists
-    //                    lseek(fd,26,SEEK_CUR);
-    //                    read(fd,&type,1);
-    //                    if(type==0xC0)
-    //                    {
-    //                       // printf("Found Stream\n");
-    //                        //Read the length of the file name
-    //                        lseek(fd,2,SEEK_CUR);
-    //                        read(fd,&nameLength,1);
-    //                        //Get the first cluster of the directory
-    //                        lseek(fd,16,SEEK_CUR);
-    //                        read(fd,&clstr,4);
-    //                        //Go to the file name dir entry
-    //                        lseek(fd,8,SEEK_CUR);
-    //                        read(fd,&type,1);
-    //                        if(type==0xC1)
-    //                        {
-    //                            //Get the name
-    //                            lseek(fd,1,SEEK_CUR);
-    //                            for(i=0;i<15;i++)
-    //                            {
-    //                                read(fd,&name[i],2);
-    //                            }
-    //                            char* nn=unicode2ascii(name,nameLength);
-    //                            //Print "-" according to level of recursion
-    //                            for(i=0;i<level;i++)
-    //                            {
-    //                                printf("-");
-    //                            }
-    //                            //Print the name of the directory
-    //                            printf("Directory: %s\n",nn);
-    //                            free(nn);
-    //                            //Recurse
-    //                            //recList(fd,mainSec,clstr,level+1);
-    //                        }
-    //                    }
-    //
-    //                    //If it doesn't and it is the last entry of the cluster, check if it exists in the next cluster
-    //                    else if((i==(clusterLength/32)-1) && clusterChain[index+1]!=UINT32_MAX)
-    //                {
-    //                    //Go to the next cluster
-    //                    lseek(fd,mainSec->clusterHeapOffset*sectorLength,SEEK_SET);
-    //                    lseek(fd,(clusterChain[index+1]-2)*clusterLength,SEEK_CUR);
-    //                    //Check if the first entry is the stream extension
-    //                    read(fd,&type,1);
-    //                    if(type==0xC0)
-    //                    {
-    //                        // printf("Found Stream\n");
-    //                        //Read the length of the file name
-    //                        lseek(fd,2,SEEK_CUR);
-    //                        read(fd,&nameLength,1);
-    //                        //Get the first cluster of the directory
-    //                        lseek(fd,16,SEEK_CUR);
-    //                        read(fd,&clstr,4);
-    //                        //Go to the file name dir entry
-    //                        lseek(fd,8,SEEK_CUR);
-    //                        read(fd,&type,1);
-    //                        if(type==0xC1)
-    //                        {
-    //                            //Get the name
-    //                            lseek(fd,1,SEEK_CUR);
-    //                            for(i=0;i<15;i++)
-    //                            {
-    //                                read(fd,&name[i],2);
-    //                            }
-    //                            char* nn=unicode2ascii(name,nameLength);
-    //                            //Print "-" according to the level of recursion
-    //                            for(i=0;i<level;i++)
-    //                            {
-    //                                printf("-");
-    //                            }
-    //                            printf("Directory: %s\n",nn);
-    //                            free(nn);
-    //                            //Recurse
-    //                            //recList(fd,mainSec,clstr,level+1);
-    //                        }
-    //                    }
-    //                }
-    //                else
-    //                {
-    //                    //Do nothing
-    //                }
-    //            }
-    //            //File (Base Case)
-    //            else
-    //            {
-    //                //printf("File\n");
-    //            }
-    //        }
-    //        //Go to the next directory entry
-    //        else
-    //        {
-    //            lseek(fd,31,SEEK_CUR);
-    //        }
-    //
-    //    }
-    //        index++;
-    //    }
-    //    free(clusterChain);
