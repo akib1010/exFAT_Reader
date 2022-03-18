@@ -1,5 +1,3 @@
-# Assignment 4
-
 ## Running the program
 * type "make" to compile
 * type "./a4q1 <imageName.exfat> <COMMAND> <PATH (only for 'get')>"
